@@ -210,7 +210,7 @@ if(p.Results.display)
             'Location', 'Best');
 end
 
-disp('Registering...');
+fprintf('Registering...');
 
 %% 1) Initialization
 % In the paper, they used subcript i to describe 'time' (or in registration
@@ -500,7 +500,7 @@ end
 % test
 history.chosenrmse = N_point+best_meandist_idx;
 
-disp('Finished...');
+fprintf('Finished');
 
 end
 

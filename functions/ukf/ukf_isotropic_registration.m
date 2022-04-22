@@ -1,4 +1,4 @@
-function [T_all, mean_dist] = ukf_isotropic_registration(moving, fixed, varargin)
+function [T_all, mean_dist, history] = ukf_isotropic_registration(moving, fixed, varargin)
 % SUMMARY: This is an implementation of Unscented Kalman Filter (UKF)-based 
 % 3D point cloud registration (https://ieeexplore.ieee.org/document/4359030).
 %
@@ -71,6 +71,12 @@ function [T_all, mean_dist] = ukf_isotropic_registration(moving, fixed, varargin
 %                  noise initialization. In the paper, this parameter
 %                  refered as Sigma_x (Lower-right 3x3 matrix of Sigma_x).
 %
+%   bestrmse       A logical. If this parameter specified, this function
+%                  will choose the transformation based on the best mean
+%                  distance that is estimated by UKF. This is my addition 
+%                  to the function, not from original paper. Check the last
+%                  last part of this function.
+%
 %   verbose        A logical. If you want to see the progress of the
 %                  transformation and mean distance between the moving and
 %                  fixed point cloud, set this parameter to true.
@@ -90,13 +96,20 @@ function [T_all, mean_dist] = ukf_isotropic_registration(moving, fixed, varargin
 %   mean_dist      The mean euclidean distance between the measurement / 
 %                  moving point set and the fixed point set.
 %
+%   history        Sequence of all transformation and mean distance during
+%                  the registration loop. A struct consist of two fields,
+%                  history.transformations and history.mean_distances
 
 %% 0) Input parser and preparation for the function
 
 p = inputParser;
-addRequired(p, 'moving');
-addRequired(p, 'fixed');
-addOptional(p, 'movingdebug', zeros(3,1));
+addRequired( p, 'moving', ...
+             @(x) validateattributes(x, {'double'}, {'nrows', 3}) );
+addRequired( p, 'fixed', ...
+             @(x) validateattributes(x, {'double'}, {'nrows', 3}) );
+addOptional( p, 'movingdebug', zeros(3,1), ...
+             @(x) validateattributes(x, {'double'}, {'nrows', 3}) );
+         
 addParameter( p, 'alpha', 0.5, ...
               @(x) isnumeric(x) && x>0 && x<1);
 addParameter( p, 'beta', 2, ...
@@ -115,6 +128,9 @@ addParameter( p, 'sigmaxtrans', 1, ...
               @(x) isnumeric(x) );
 addParameter( p, 'sigmaxtheta', 1, ...
               @(x) isnumeric(x) );
+
+addParameter( p, 'bestrmse', false, ...
+              @(x) islogical(x) );
 addParameter( p, 'verbose', true, ...
               @(x) islogical(x) );
 addParameter( p, 'display', true, ...
@@ -129,7 +145,7 @@ N_point = length(U);
 
 % display results only if the user specify the display argument
 if(p.Results.display)
-    figure1 = figure(1);
+    figure1 = figure('Name', 'UKF Registration');
     figure1.WindowState  = 'maximized';
     axes1 = axes('Parent', figure1);
     xlabel(axes1, 'X'); ylabel(axes1, 'Y'); zlabel(axes1, 'Z');
@@ -164,7 +180,7 @@ if(p.Results.display)
             'Location', 'Best');
 end
 
-disp('Registering...');
+fprintf('Registering...');
 
 %% 1) Initialization
 % In the paper, they used subcript i to describe 'time' (or in registration
@@ -208,6 +224,9 @@ max_iter      = p.Results.iteration;
 
 % variable to store the overall transformation
 T_all = eye(4);
+% variable to store the tansformations and mean distance history
+mean_distances  = [];
+transformations = [];
 
 % In this simulation, i will continue the registration even after all the
 % points in U is used. I changed the main loop not to loop for all points
@@ -333,6 +352,15 @@ for iter=1:max_iter
     
     % store the transformation
     T_all = [R_xest_bar_theta, xest_bar_trans; zeros(1,3), 1] * T_all;
+    
+    % store the transformation history
+    t_all   = T_all(1:3, 4);
+    R_all   = T_all(1:3, 1:3);
+    eul_all = rad2deg(rotm2eul(R_all, 'ZYX'));
+    transformations = [transformations; t_all', eul_all];
+    
+    % store the mean distance history
+    mean_distances  = [mean_distances, mean_dist];
 
     %% 6) Convergence check
     
@@ -352,9 +380,6 @@ for iter=1:max_iter
         fprintf('%d %d %.4f\n\n', iter, k, mean_dist);
         
         % print current estimated transformation
-        t_all   = T_all(1:3, 4);
-        R_all   = T_all(1:3, 1:3);
-        eul_all = rad2deg(rotm2eul(R_all, 'ZYX'));
         disp([t_all', eul_all]);
     end
     
@@ -381,7 +406,38 @@ for iter=1:max_iter
     
 end
 
-disp('Finished...');
+% save the transformation and mean distance history to a struct
+history.transformations = transformations;
+history.mean_distances  = mean_distances;
+
+%% 7) Search for the best transformation
+% This is addition step i write. At first few iteration, UKF drastically
+% minimize the RMSE, but at some point of iteration, it stop minimizing,
+% and jiggling around some number of RMSE. I observed, there is no 
+% guarantee that the last iteration will be the best. So here, i will 
+% search the most minimum mean distance of all of the history, and this 
+% function will spit out that particular transformation rather than the 
+% last transformation.
+
+% if the user specifed 'bestrmse'
+if (p.Results.bestrmse)
+    % search the minimum mean distance
+    [best_meandist_val, best_meandist_idx] = min(mean_distances(N_point+1:end));
+    
+    % replace the returned mean_dist value to the best one
+    mean_dist           = best_meandist_val;
+    % replace the returned T_all to the best one according to mean distance
+    best_transformation = transformations(N_point+best_meandist_idx, :);
+    xest_bar_trans      = best_transformation(1:3);
+    xest_bar_theta      = best_transformation(4:6);
+    R_xest_bar_theta    = eul2rotm(deg2rad(xest_bar_theta), 'ZYX');
+    T_all               = [R_xest_bar_theta, xest_bar_trans'; zeros(1,3), 1];
+end
+
+% test
+history.chosenrmse = N_point+best_meandist_idx;
+
+fprintf('Finished');
 
 end
 
